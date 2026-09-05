@@ -1,0 +1,530 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  // Migrations need a direct (unpooled) connection — PgBouncer-style poolers
+  // do not support the advisory locks Prisma Migrate takes. Falls back to
+  // DATABASE_URL locally, where there is no pooler.
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  TENANT
+  LANDLORD
+  ADMIN
+}
+
+enum AccountType {
+  tenant
+  landlord
+}
+
+enum ApplicationStatus {
+  draft
+  submitted
+  shortlisted
+  accepted
+  declined
+  completed
+}
+
+enum VerificationStatus {
+  pending
+  verified
+  rejected
+}
+
+enum MaintenanceStatus {
+  pending
+  acknowledged
+  in_progress
+  resolved
+}
+
+enum DisputeType {
+  unlawful_eviction
+  unpaid_deposit
+  property_damage
+  other
+}
+
+enum DisputeStatus {
+  open
+  resolved
+}
+
+enum ImprovementCostStatus {
+  pending
+  approved
+  rejected
+}
+
+// A tenant fronting the cost expects it back via a reduced deposit deduction
+// (deposit) or reduced rent while the tenancy continues (rent) — both are
+// treated identically at final settlement, since "deduct from rent" windows
+// can close before move-out. reimburse_separately opts out of the automatic
+// settlement/deposit math entirely — it's tracked for the record only.
+enum SettlementMethod {
+  deduct_from_deposit
+  deduct_from_rent
+  reimburse_separately
+}
+
+enum MoveOutStatus {
+  proposed
+  acknowledged
+  settled
+  disputed
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  passwordHash  String
+  role          Role      @default(TENANT)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  profile       Profile?
+  accounts      Account[]
+  sessions      Session[]
+}
+
+model Profile {
+  id                   String                  @id @default(cuid())
+  userId               String                  @unique
+  displayName          String
+  accountType          AccountType             @default(tenant)
+  lastActiveAt         DateTime?
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+  user                 User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  savedListings        SavedListing[]
+  applications         Application[]
+  roommatePreference   RoommatePreference?
+  roommateSessions     RoommateSession[]
+  shareLinks           ShareLink[]
+  agreementDrafts      AgreementDraft[]
+  landlordVerification LandlordVerification?
+  tenantVerification   TenantVerification?
+  landlordDocuments    LandlordDocument[]
+  adminInvitesCreated  AdminInvite[]
+  reviewsWritten       Review[]
+  activityEvents       ActivityEvent[]
+  disputesFiled        Dispute[]
+  messagesSent         Message[]
+  matchPreference      ListingMatchPreference?
+}
+
+model Listing {
+  id             String          @id
+  title          String
+  description    String?
+  area           String
+  city           String
+  latitude       Float
+  longitude      Float
+  rent           Int
+  deposit        Int
+  roomType       String
+  availableFrom  DateTime
+  status         String
+  postedOn       DateTime
+  landlordId     String
+  houseRules     String[]        @default([])
+  photoUrls      String[]        @default([])
+  sqft           Int?
+  savedBy        SavedListing[]
+  applications   Application[]
+  payments       Payment[]
+  activityEvents ActivityEvent[]
+}
+
+model SavedListing {
+  id        String   @id @default(cuid())
+  profileId String
+  listingId String
+  createdAt DateTime @default(now())
+  profile   Profile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@unique([profileId, listingId])
+}
+
+model Application {
+  id                  String               @id @default(cuid())
+  profileId           String
+  listingId           String
+  note                String?
+  status              ApplicationStatus    @default(submitted)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  profile             Profile              @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  listing             Listing              @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  reviews             Review[]
+  maintenanceRequests MaintenanceRequest[]
+  disputes            Dispute[]
+  messages            Message[]
+  moveOut             MoveOut?
+  improvementCosts    ImprovementCost[]
+
+  @@unique([profileId, listingId])
+}
+
+// `rating` stays the derived 1-5 overall (rounded average of categoryRatings)
+// so the existing Trust Score computation in analytics.server.ts, which
+// reads `rating` directly, needed no changes. `categoryRatings` is nullable
+// because reviews submitted before category breakdowns existed only have
+// the overall number — never backfilled, same "frozen snapshot" pattern as
+// Dispute.evidenceJson.
+model Review {
+  id              String      @id @default(cuid())
+  applicationId   String
+  raterProfileId  String
+  rating          Int
+  comment         String?
+  categoryRatings Json?
+  createdAt       DateTime    @default(now())
+  application     Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  raterProfile    Profile     @relation(fields: [raterProfileId], references: [id], onDelete: Cascade)
+
+  @@unique([applicationId, raterProfileId])
+}
+
+model MaintenanceRequest {
+  id             String            @id @default(cuid())
+  applicationId  String
+  title          String
+  description    String
+  photoUrl       String?           @db.Text
+  status         MaintenanceStatus @default(pending)
+  createdAt      DateTime          @default(now())
+  acknowledgedAt DateTime?
+  inProgressAt   DateTime?
+  resolvedAt     DateTime?
+  application    Application       @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+}
+
+// Smart Evidence Resolution: filing snapshots the tenancy's evidence (agreement,
+// payments, maintenance timeline, activity log) into evidenceJson at the moment
+// of filing, rather than re-deriving it live later — matching the tamper-evident,
+// point-in-time nature of the rest of the record. aiSummary/aiInconsistencies/
+// aiSuggestedSplit are Gemini's non-binding read of that snapshot; only the
+// admin's own `resolution` text is the actual, binding outcome.
+model Dispute {
+  id                String        @id @default(cuid())
+  applicationId     String
+  filedByProfileId  String
+  filedByRole       String
+  type              DisputeType
+  description       String        @db.Text
+  status            DisputeStatus @default(open)
+  evidenceJson      Json
+  aiSummary         String?       @db.Text
+  aiInconsistencies Json?
+  aiSuggestedSplit  String?       @db.Text
+  aiSource          String?
+  resolution        String?       @db.Text
+  resolvedByUserId  String?
+  createdAt         DateTime      @default(now())
+  resolvedAt        DateTime?
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  filedBy     Profile     @relation(fields: [filedByProfileId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId])
+  @@index([status])
+}
+
+// In-Platform Messaging: threaded per-tenancy (not an open-ended inbox), the
+// same tamper-evident-timeline premise as ActivityEvent — flagged messages
+// get mirrored into the timeline and later feed the Dispute evidence bundle.
+model Message {
+  id              String   @id @default(cuid())
+  applicationId   String
+  senderProfileId String
+  senderRole      String
+  body            String   @db.Text
+  flagged         Boolean  @default(false)
+  flagReason      String?  @db.Text
+  createdAt       DateTime @default(now())
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  sender      Profile     @relation(fields: [senderProfileId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId])
+}
+
+// Move-Out & Final Settlement: one row per tenancy (applicationId is unique),
+// a small state machine rather than a status string, since each step gates
+// on a specific prior step actually having happened (you can't set deductions
+// before the tenant has acknowledged an end date, can't finalize before both
+// parties confirm). `disputed` is an escape hatch, not a dead end — tenantConfirmedAt
+// staying null and disputeId being set means the tenant rejected the settlement
+// and it escalated into Smart Evidence Resolution instead of silently stalling.
+// Reaching `settled` is what flips Application.status to "completed", which is
+// the same flag Reviews and the landlord's vacancy/occupancy numbers already key off.
+model MoveOut {
+  id                   String        @id @default(cuid())
+  applicationId        String        @unique
+  proposedEndDate      DateTime
+  status               MoveOutStatus @default(proposed)
+  tenantAcknowledgedAt DateTime?
+  totalRentPaid        Int           @default(0)
+  depositAmount        Int           @default(0)
+  deductionsJson       Json          @default("[]")
+  netRefund            Int           @default(0)
+  landlordConfirmedAt  DateTime?
+  tenantConfirmedAt    DateTime?
+  refundReference      String?
+  refundLoggedAt       DateTime?
+  disputeId            String?
+  createdAt            DateTime      @default(now())
+  settledAt            DateTime?
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+}
+
+// Renovation & Improvement Cost Log: distinguishes proactive improvements
+// (repainting, fixture upgrades, informal repairs) from reactive
+// MaintenanceRequest entries. Either party can log one; it only counts once
+// the OTHER party approves — decidedByProfileId records who. Approval is what
+// makes an entry "feed" the settlement math and analytics, not the logging
+// itself, so a party can't unilaterally inflate their own numbers.
+model ImprovementCost {
+  id                 String                @id @default(cuid())
+  applicationId      String
+  loggedByProfileId  String
+  loggedByRole       String
+  title              String
+  description        String
+  amount             Int
+  photoUrl           String?               @db.Text
+  settlementMethod   SettlementMethod
+  status             ImprovementCostStatus @default(pending)
+  decidedByProfileId String?
+  createdAt          DateTime              @default(now())
+  decidedAt          DateTime?
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+}
+
+model RoommatePreference {
+  id                   String   @id @default(cuid())
+  profileId            String   @unique
+  budget               Int
+  sleep                String
+  smoking              String
+  smokingNonNegotiable Boolean  @default(false)
+  cooking              String   @default("Occasionally")
+  study                String
+  visitors             String
+  updatedAt            DateTime @updatedAt
+  profile              Profile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
+}
+
+// Personalized Listing Match Score: a one-time tenant-to-listing preference
+// profile, distinct from RoommatePreference (tenant-to-tenant). hasPets/
+// smokes/frequentVisitors are the tenant's own traits, checked at score time
+// against a listing's houseRules/description text for a hard deal-breaker
+// filter — mustHaves is collected but not scored (same "collected, not part
+// of the formula" precedent as RoommatePreference.cooking above).
+model ListingMatchPreference {
+  id                 String   @id @default(cuid())
+  profileId          String   @unique
+  budgetCeiling      Int
+  commuteAnchorLabel String
+  commuteAnchorLat   Float
+  commuteAnchorLng   Float
+  roomType           String
+  hasPets            Boolean  @default(false)
+  smokes             Boolean  @default(false)
+  frequentVisitors   Boolean  @default(false)
+  mustHaves          String[] @default([])
+  updatedAt          DateTime @updatedAt
+  profile            Profile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
+}
+
+model RoommateSession {
+  id          String   @id @default(cuid())
+  profileId   String
+  label       String
+  profileData Json
+  results     Json
+  createdAt   DateTime @default(now())
+  profile     Profile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
+}
+
+model Payment {
+  id            String   @id @default(cuid())
+  transactionId String   @unique
+  listingId     String
+  profileId     String
+  amount        Int
+  month         String
+  status        String   @default("pending")
+  validationId  String?
+  createdAt     DateTime @default(now())
+  listing       Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+}
+
+// Append-only audit trail for a tenancy (one listing + one tenant profile).
+// No update/delete route exists for this model on purpose — the timeline is
+// meant to be tamper-evident, so events are only ever created by server-side
+// actions (agreement signing, payment outcomes, and future maintenance/repair/
+// checkout events from other modules), never edited by a client.
+model ActivityEvent {
+  id              String   @id @default(cuid())
+  listingId       String
+  tenantProfileId String
+  type            String
+  actor           String
+  summary         String
+  metadata        Json?
+  createdAt       DateTime @default(now())
+
+  listing       Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  tenantProfile Profile @relation(fields: [tenantProfileId], references: [id], onDelete: Cascade)
+
+  @@index([listingId, tenantProfileId])
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+enum ShareLinkType {
+  agreement
+  roommate_session
+}
+
+model ShareLink {
+  id         String        @id @default(cuid())
+  token      String        @unique @default(cuid())
+  type       ShareLinkType
+  resourceId String
+  profileId  String
+  revoked    Boolean       @default(false)
+  expiresAt  DateTime
+  createdAt  DateTime      @default(now())
+  profile    Profile       @relation(fields: [profileId], references: [id], onDelete: Cascade)
+}
+
+model LandlordVerification {
+  id                String             @id @default(cuid())
+  profileId         String             @unique
+  nidNumber         String
+  phone             String
+  propertyAddress   String
+  nidPhotoUrl       String?            @db.Text
+  ownershipProofUrl String?            @db.Text
+  selfiePhotoUrl    String?            @db.Text
+  status            VerificationStatus @default(pending)
+  reviewNote        String?
+  submittedAt       DateTime           @default(now())
+  reviewedAt        DateTime?
+  profile           Profile            @relation(fields: [profileId], references: [id], onDelete: Cascade)
+}
+
+enum LandlordDocumentType {
+  utility_bill
+  sublet_agreement
+}
+
+// Post-verification documents a verified landlord uploads for prospective
+// tenants to inspect before applying (utility bills, sub-let lease
+// agreements) — distinct from LandlordVerification's admin-only NID/ownership
+// docs, which are never shown to tenants.
+model LandlordDocument {
+  id        String               @id @default(cuid())
+  profileId String
+  type      LandlordDocumentType
+  label     String
+  fileUrl   String               @db.Text
+  createdAt DateTime             @default(now())
+  profile   Profile              @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([profileId])
+}
+
+model TenantVerification {
+  id          String             @id @default(cuid())
+  profileId   String             @unique
+  nidNumber   String
+  phone       String
+  nidPhotoUrl String?            @db.Text
+  status      VerificationStatus @default(pending)
+  reviewNote  String?
+  submittedAt DateTime           @default(now())
+  reviewedAt  DateTime?
+  profile     Profile            @relation(fields: [profileId], references: [id], onDelete: Cascade)
+}
+
+model AgreementDraft {
+  id                     String    @id @default(cuid())
+  profileId              String
+  reference              String
+  termsJson              Json
+  clausesJson            Json
+  source                 String
+  createdAt              DateTime  @default(now())
+  tenantSignature        String?   @db.Text
+  tenantSignedAt         DateTime?
+  landlordSignature      String?   @db.Text
+  landlordSignedAt       DateTime?
+  // Dedup guards for the scheduled expiry reminder scan (Vacancy & Agreement
+  // Expiry Notification System) — without these, a scan that runs more than
+  // once inside the same 30-day or 7-day window would re-send the same
+  // reminder every time it runs.
+  expiry30ReminderSentAt DateTime?
+  expiry7ReminderSentAt  DateTime?
+  profile                Profile   @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@unique([profileId, reference])
+}
+
+model AdminInvite {
+  id          String    @id @default(cuid())
+  code        String    @unique
+  createdById String
+  usedByEmail String?
+  usedAt      DateTime?
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime
+  createdBy   Profile   @relation(fields: [createdById], references: [id], onDelete: Cascade)
+}

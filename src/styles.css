@@ -1,0 +1,132 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Work+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap");
+
+:root {
+  /* Dark is the default look — bare :root so it still renders correctly
+     with no JS/data-theme at all (e.g. no-JS fallback). */
+  --background: #0a0a0a;
+  --foreground: #f2f0eb;
+  --card: #141414;
+  --card-foreground: #f2f0eb;
+  --popover: #141414;
+  --popover-foreground: #f2f0eb;
+  --primary: #f2f0eb;
+  --primary-foreground: #0a0a0a;
+  --secondary: #1c1c1c;
+  --secondary-foreground: #f2f0eb;
+  --muted: #1a1a1a;
+  --muted-foreground: #8a8a86;
+  --accent: #c9a876;
+  --accent-foreground: #0a0a0a;
+  --destructive: #e5695c;
+  --destructive-foreground: #0a0a0a;
+  --border: #262626;
+  --input: #262626;
+  --ring: #f2f0eb;
+  --radius: 0rem;
+  --paper: #0a0a0a;
+  --ink: #f2f0eb;
+  --trust-high: #7fd99a;
+  --trust-mid: #c9a876;
+  --trust-low: #e5695c;
+}
+
+/* Light mode: applied when the user's system prefers light and they haven't
+   explicitly chosen dark (covers the brief pre-hydration paint / no-JS case). */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --background: #f7f5f0;
+    --foreground: #16140f;
+    --card: #ffffff;
+    --card-foreground: #16140f;
+    --popover: #ffffff;
+    --popover-foreground: #16140f;
+    --primary: #16140f;
+    --primary-foreground: #f7f5f0;
+    --secondary: #efece3;
+    --secondary-foreground: #16140f;
+    --muted: #efece3;
+    --muted-foreground: #6b6862;
+    --accent: #9c7a44;
+    --accent-foreground: #16140f;
+    --destructive: #c23b2e;
+    --destructive-foreground: #f7f5f0;
+    --border: #e2ded2;
+    --input: #e2ded2;
+    --ring: #16140f;
+    --paper: #f7f5f0;
+    --ink: #16140f;
+    --trust-high: #2f8f52;
+    --trust-mid: #9c7a44;
+    --trust-low: #c23b2e;
+  }
+}
+
+/* Explicit user choice (via the toggle) always wins over system preference. */
+:root[data-theme="light"] {
+  --background: #f7f5f0;
+  --foreground: #16140f;
+  --card: #ffffff;
+  --card-foreground: #16140f;
+  --popover: #ffffff;
+  --popover-foreground: #16140f;
+  --primary: #16140f;
+  --primary-foreground: #f7f5f0;
+  --secondary: #efece3;
+  --secondary-foreground: #16140f;
+  --muted: #efece3;
+  --muted-foreground: #6b6862;
+  --accent: #9c7a44;
+  --accent-foreground: #16140f;
+  --destructive: #c23b2e;
+  --destructive-foreground: #f7f5f0;
+  --border: #e2ded2;
+  --input: #e2ded2;
+  --ring: #16140f;
+  --paper: #f7f5f0;
+  --ink: #16140f;
+  --trust-high: #2f8f52;
+  --trust-mid: #9c7a44;
+  --trust-low: #c23b2e;
+}
+
+* {
+  box-sizing: border-box;
+  border-color: var(--border);
+}
+
+html {
+  font-family: "Work Sans", ui-sans-serif, system-ui, sans-serif;
+  background-color: var(--background);
+  color: var(--foreground);
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+@layer components {
+  .eyebrow {
+    @apply font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground;
+  }
+}
